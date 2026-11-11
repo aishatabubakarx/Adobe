@@ -1,0 +1,91 @@
+name: Adobe Stock scraper (no Apify)
+
+on:
+  workflow_dispatch:
+    inputs:
+      urls:
+        description: "Contributor, search or asset link(s) (separate multiple with a space or new line)"
+        required: true
+        type: string
+      max_pages:
+        description: "Pages to read per contributor/search link (about 100 assets per page)"
+        required: false
+        default: "1"
+        type: string
+      details:
+        description: "Open each asset page to look for downloads, views and upload date"
+        required: false
+        default: true
+        type: boolean
+      max_details:
+        description: "Max asset pages to open (keep small, e.g. 10, to be gentle with Adobe)"
+        required: false
+        default: "10"
+        type: string
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Playwright
+        run: |
+          pip install playwright
+          playwright install --with-deps chromium
+
+      - name: Prepare URL list
+        env:
+          URLS: ${{ inputs.urls }}   # via env to avoid shell injection
+        run: |
+          printf '%s\n' "$URLS" | tr -s ' \t' '\n\n' | sed '/^$/d' > urls.txt
+          cat urls.txt
+
+      - name: Scrape
+        env:
+          MAX_PAGES: ${{ inputs.max_pages }}
+          DETAILS: ${{ inputs.details }}
+          MAX_DETAILS: ${{ inputs.max_details }}
+        run: |
+          MAX_PAGES="${MAX_PAGES//[^0-9]/}"
+          MAX_DETAILS="${MAX_DETAILS//[^0-9]/}"
+          EXTRA=""
+          if [ "$DETAILS" = "true" ]; then
+            EXTRA="--details --max-details ${MAX_DETAILS:-10}"
+          fi
+          python adobe_stock_scraper.py --file urls.txt --out adobe_assets.csv --max-pages "${MAX_PAGES:-1}" $EXTRA
+
+      - name: Show results in job summary
+        if: always()
+        run: |
+          python - << 'PY' >> "$GITHUB_STEP_SUMMARY"
+          import csv, os
+          if os.path.exists("adobe_assets.csv"):
+              rows = list(csv.DictReader(open("adobe_assets.csv", encoding="utf-8-sig")))
+              dl = sum(1 for r in rows if r.get("downloads") not in (None, ""))
+              print(f"**{len(rows)} assets, downloads found for {dl}**\n")
+              print("| Rank | Title | Downloads | Views | Upload date | Source |")
+              print("|---|---|---|---|---|---|")
+              for r in rows[:200]:
+                  t = (r.get("title") or "").replace("|", "\\|")[:50]
+                  print(f"| {r.get('rank','')} | {t} | {r.get('downloads','')} | {r.get('views','')} | {r.get('upload_date','')} | {r.get('detail_source','')} |")
+              if len(rows) > 200:
+                  print("\n_Showing first 200 rows. Download the artifact for all._")
+          else:
+              print("No results file was produced.")
+          PY
+
+      - name: Upload results and debug data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: adobe-results
+          path: |
+            adobe_assets.csv
+            debug/
+          if-no-files-found: ignore
